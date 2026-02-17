@@ -16,15 +16,17 @@ export default function Home() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [totalCount, setTotalCount] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const fetchCompanies = useCallback(
-    async (start: number, end: number, append = false) => {
+    async (start: number, end: number, append = false, search = "") => {
       try {
         if (append) setLoadingMore(true);
         else setLoading(true);
 
+        const searchParam = search ? `&search=${encodeURIComponent(search)}` : "";
         const res = await fetch(
-          `/api/companies?start=${start}&end=${end}`
+          `/api/companies?start=${start}&end=${end}${searchParam}`
         );
         if (!res.ok) throw new Error("Failed to fetch companies");
         const { data, count } = await res.json();
@@ -47,13 +49,13 @@ export default function Home() {
   );
 
   useEffect(() => {
-    fetchCompanies(0, PAGE_SIZE - 1);
-  }, [fetchCompanies]);
+    fetchCompanies(0, PAGE_SIZE - 1, false, searchQuery);
+  }, [fetchCompanies, searchQuery]);
 
   const handleMore = () => {
     const nextStart = companies.length;
     const nextEnd = nextStart + PAGE_SIZE - 1;
-    fetchCompanies(nextStart, nextEnd, true);
+    fetchCompanies(nextStart, nextEnd, true, searchQuery);
   };
 
   const hasMore =
@@ -72,6 +74,16 @@ export default function Home() {
           >
             Battle
           </Link>
+        </div>
+
+        <div className="mb-6">
+          <input
+            type="text"
+            placeholder="Search companies..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm text-zinc-900 placeholder-zinc-400 focus:border-zinc-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:border-zinc-600"
+          />
         </div>
 
         {loading && (
