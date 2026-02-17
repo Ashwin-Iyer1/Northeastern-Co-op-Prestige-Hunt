@@ -3,57 +3,54 @@ import { battleTokens } from "@/app/lib/battle-tokens";
 import { NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 
-export async function GET() {
-  // Get total company count
-  const { count, error: countError } = await supabase
-    .from("companies")
-    .select("*", { count: "exact", head: true });
+const MAX_ELO_DIFF = 200;
+const MAX_RANK_DIFF = 10;
 
-  if (countError || count === null || count < 2) {
+export async function GET() {
+  // Fetch all companies ordered by ELO descending (index = rank)
+  const { data: allCompanies, error: fetchError } = await supabase
+    .from("companies")
+    .select("id, company_name, elo")
+    .order("elo", { ascending: false });
+
+  if (fetchError || !allCompanies || allCompanies.length < 2) {
     return NextResponse.json(
       { error: "Could not fetch companies" },
       { status: 500 }
     );
   }
 
-  // Pick 2 different random indices
-  const idx1 = Math.floor(Math.random() * count);
-  let idx2 = Math.floor(Math.random() * (count - 1));
-  if (idx2 >= idx1) idx2++;
+  // Pick a random company
+  const idx1 = Math.floor(Math.random() * allCompanies.length);
+  const company1 = allCompanies[idx1];
 
-  // Fetch both companies in parallel
-  const [res1, res2] = await Promise.all([
-    supabase
-      .from("companies")
-      .select("id, company_name, elo")
-      .order("id", { ascending: true })
-      .range(idx1, idx1)
-      .single(),
-    supabase
-      .from("companies")
-      .select("id, company_name, elo")
-      .order("id", { ascending: true })
-      .range(idx2, idx2)
-      .single(),
-  ]);
+  // Find eligible opponents: within 200 ELO or 10 ranks
+  const eligible = allCompanies.filter((c, idx) => {
+    if (c.id === company1.id) return false;
+    const eloDiff = Math.abs(c.elo - company1.elo);
+    const rankDiff = Math.abs(idx - idx1);
+    return eloDiff <= MAX_ELO_DIFF || rankDiff <= MAX_RANK_DIFF;
+  });
 
-  if (res1.error || res2.error || !res1.data || !res2.data) {
+  if (eligible.length === 0) {
     return NextResponse.json(
-      { error: "Could not fetch matchup" },
+      { error: "No eligible opponents found" },
       { status: 500 }
     );
   }
 
+  const company2 = eligible[Math.floor(Math.random() * eligible.length)];
+
   // Create a single-use token tied to this matchup
   const token = randomUUID();
   battleTokens.set(token, {
-    company_1: res1.data.id,
-    company_2: res2.data.id,
+    company_1: company1.id,
+    company_2: company2.id,
     created_at: Date.now(),
   });
 
   return NextResponse.json({
-    data: [res1.data, res2.data],
+    data: [company1, company2],
     token,
   });
 }
