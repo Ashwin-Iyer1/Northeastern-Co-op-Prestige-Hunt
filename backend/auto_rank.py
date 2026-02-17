@@ -104,13 +104,23 @@ async def call_gpt(prompt: str, semaphore: asyncio.Semaphore) -> str:
         return response.choices[0].message.content.strip()
 
 
+UPSET_BONUS_SCALE = 0.5  # extra K per 100 ELO gap when underdog wins (tune as needed)
+
 def compute_new_elos(
     winner_elo: float, loser_elo: float
 ) -> tuple[float, float]:
-    """Standard ELO update (K=20)."""
+    """ELO update with upset bonus: low-ELO winners earn extra points."""
     expected_win = 1 / (1 + 10 ** ((loser_elo - winner_elo) / 400))
     expected_lose = 1 - expected_win
-    new_winner = winner_elo + K * (1 - expected_win)
+
+    # Upset bonus: if the winner had a lower ELO, scale up their K-factor
+    elo_gap = loser_elo - winner_elo  # positive when underdog wins
+    if elo_gap > 0:
+        upset_multiplier = 1 + UPSET_BONUS_SCALE * (elo_gap / 100)
+    else:
+        upset_multiplier = 1.0
+
+    new_winner = winner_elo + K * upset_multiplier * (1 - expected_win)
     new_loser = loser_elo + K * (0 - expected_lose)
     return new_winner, new_loser
 
@@ -204,6 +214,7 @@ async def main():
             try:
                 update_elo_in_db(winner["id"], new_winner_elo)
                 update_elo_in_db(loser["id"], new_loser_elo)
+                print(f"  [+] Battle {battle_num}: {name_map[winner['id']]} beat {name_map[loser['id']]}")
                 wins += 1
             except Exception as e:
                 errors += 1
