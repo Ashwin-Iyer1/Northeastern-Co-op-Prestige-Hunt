@@ -14,10 +14,10 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 OPENAI_API_KEY = os.environ["openai_api_key"]
 
 TOTAL_BATTLES = 10_000
-K = 20  # ELO K-factor (matches the frontend)
-ELO_PROXIMITY_WINDOW = 100  # max ELO difference for "similar" matchups
+K = 48  # ELO K-factor (higher = faster convergence)
+ELO_PROXIMITY_WINDOW = 300  # max ELO difference for "similar" matchups
 BATCH_PRINT_EVERY = 50  # progress log frequency
-MAX_CONCURRENT = 50  # max parallel OpenAI requests (stay under rate limits)
+MAX_CONCURRENT = 200  # max parallel OpenAI requests (stay under rate limits)
 
 # ── Clients ─────────────────────────────────────────────────────────────
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -104,7 +104,7 @@ async def call_gpt(prompt: str, semaphore: asyncio.Semaphore) -> str:
         return response.choices[0].message.content.strip()
 
 
-UPSET_BONUS_SCALE = 0.5  # extra K per 100 ELO gap when underdog wins (tune as needed)
+UPSET_BONUS_SCALE = 0.75  # extra K per 100 ELO gap when underdog wins (tune as needed)
 
 def compute_new_elos(
     winner_elo: float, loser_elo: float
@@ -150,8 +150,10 @@ async def main():
 
     # Process in batches of MAX_CONCURRENT
     battle_num = 0
+    batch_count = 0
     while battle_num < TOTAL_BATTLES:
         batch_size = min(MAX_CONCURRENT, TOTAL_BATTLES - battle_num)
+        batch_count += 1
 
         # Refresh local companies list with current in-memory ELOs
         for c in companies:
@@ -164,14 +166,19 @@ async def main():
             matchups.append((a, b))
 
         # Build prompts and fire all GPT calls in parallel
+        print(f"\n🚀 Batch {batch_count}: Firing {batch_size} parallel API calls...")
+        batch_start = time.time()
         prompts = [
             ask_gpt_winner(name_map[a["id"]], name_map[b["id"]])
             for a, b in matchups
         ]
         tasks = [call_gpt(p, semaphore) for p in prompts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        batch_elapsed = time.time() - batch_start
+        print(f"✅ Batch {batch_count}: Completed {batch_size} API calls in {batch_elapsed:.2f}s ({batch_size/batch_elapsed:.1f} calls/s)\n")
 
-        # Process results sequentially (ELO updates must be serial for consistency)
+        # Process results and collect ELO updates
+        batch_updates = {}  # {company_id: new_elo}
         for i, (result, (company_a, company_b)) in enumerate(zip(results, matchups)):
             battle_num += 1
 
@@ -209,17 +216,13 @@ async def main():
             # Update in-memory
             elo_map[winner["id"]] = new_winner_elo
             elo_map[loser["id"]] = new_loser_elo
+            
+            # Stage updates for batch write
+            batch_updates[winner["id"]] = new_winner_elo
+            batch_updates[loser["id"]] = new_loser_elo
 
-            # Update database
-            try:
-                update_elo_in_db(winner["id"], new_winner_elo)
-                update_elo_in_db(loser["id"], new_loser_elo)
-                print(f"  [+] Battle {battle_num}: {name_map[winner['id']]} beat {name_map[loser['id']]}")
-                wins += 1
-            except Exception as e:
-                errors += 1
-                print(f"  [!] Battle {battle_num}: DB error – {e}")
-                continue
+            print(f"  [+] Battle {battle_num}: {name_map[winner['id']]} beat {name_map[loser['id']]}")
+            wins += 1
 
             if battle_num % BATCH_PRINT_EVERY == 0:
                 elapsed = time.time() - start
@@ -229,6 +232,19 @@ async def main():
                     f"{name_map[winner['id']]:>30} beat {name_map[loser['id']]:<30} | "
                     f"OK={wins} ERR={errors} | {rate:.1f} battles/s"
                 )
+
+        # Batch update database
+        if batch_updates:
+            try:
+                db_start = time.time()
+                # Update all companies in parallel using upsert
+                updates = [{"id": cid, "elo": round(elo)} for cid, elo in batch_updates.items()]
+                supabase.table("companies").upsert(updates).execute()
+                db_elapsed = time.time() - db_start
+                print(f"💾 Updated {len(batch_updates)} companies in database ({db_elapsed:.2f}s)\n")
+            except Exception as e:
+                errors += len(batch_updates)
+                print(f"  [!] Batch DB error – {e}\n")
 
     elapsed = time.time() - start
     print(f"\nDone! {wins} successful battles, {errors} errors in {elapsed:.1f}s")
