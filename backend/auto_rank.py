@@ -17,7 +17,7 @@ TOTAL_BATTLES = 10_000
 K = 48  # ELO K-factor (higher = faster convergence)
 ELO_PROXIMITY_WINDOW = 300  # max ELO difference for "similar" matchups
 BATCH_PRINT_EVERY = 50  # progress log frequency
-MAX_CONCURRENT = 200  # max parallel OpenAI requests (stay under rate limits)
+MAX_CONCURRENT = 1000  # max parallel OpenAI requests (stay under rate limits)
 
 # ── Clients ─────────────────────────────────────────────────────────────
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
