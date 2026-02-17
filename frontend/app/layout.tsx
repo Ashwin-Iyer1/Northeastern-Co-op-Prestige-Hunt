@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { GeistPixelSquare } from "geist/font/pixel";
+import { GeistPixelCircle, GeistPixelGrid, GeistPixelSquare, GeistPixelTriangle } from "geist/font/pixel";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,7 +13,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-   <html lang="en" className={GeistPixelSquare.variable}>
+   <html lang="en" className={GeistPixelTriangle.variable}>
       <body
       >
         {children}

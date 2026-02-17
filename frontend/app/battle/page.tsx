@@ -67,7 +67,7 @@ export default function BattlePage() {
         </div>
 
         <div className="mb-8 text-center">
-          <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50 font-[var(--font-pixel)]">
+          <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50 font-pixel">
             Battle
           </h1>
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
@@ -94,7 +94,7 @@ export default function BattlePage() {
               {companies[0].company_name}
             </button>
 
-            <span className="text-xs font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 font-[var(--font-pixel)]">
+            <span className="text-xs font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 font-pixel">
               vs
             </span>
 
