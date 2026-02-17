@@ -120,7 +120,7 @@ def update_elo_in_db(company_id: int, new_elo: float) -> None:
 
 
 # ── Main loop ───────────────────────────────────────────────────────────
-def main():
+async def main():
     print("Fetching all companies from Supabase…")
     companies = fetch_all_companies()
     print(f"Loaded {len(companies)} companies.\n")
@@ -129,84 +129,99 @@ def main():
         print("Need at least 2 companies to battle. Exiting.")
         return
 
-    # Build a dict for fast lookup / in-memory ELO tracking
+    # Build dicts for fast lookup / in-memory ELO tracking
     elo_map: dict[int, float] = {c["id"]: c["elo"] for c in companies}
     name_map: dict[int, str] = {c["id"]: c["company_name"] for c in companies}
 
     wins = 0
     errors = 0
     start = time.time()
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-    for battle_num in range(1, TOTAL_BATTLES + 1):
-        # Refresh the local companies list with current in-memory ELOs
+    # Process in batches of MAX_CONCURRENT
+    battle_num = 0
+    while battle_num < TOTAL_BATTLES:
+        batch_size = min(MAX_CONCURRENT, TOTAL_BATTLES - battle_num)
+
+        # Refresh local companies list with current in-memory ELOs
         for c in companies:
             c["elo"] = elo_map[c["id"]]
 
-        company_a, company_b = pick_similar_matchup(companies)
+        # Generate matchups for the batch
+        matchups = []
+        for _ in range(batch_size):
+            a, b = pick_similar_matchup(companies)
+            matchups.append((a, b))
 
-        try:
-            winner_name = ask_gpt_winner(
-                name_map[company_a["id"]], name_map[company_b["id"]]
+        # Build prompts and fire all GPT calls in parallel
+        prompts = [
+            ask_gpt_winner(name_map[a["id"]], name_map[b["id"]])
+            for a, b in matchups
+        ]
+        tasks = [call_gpt(p, semaphore) for p in prompts]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results sequentially (ELO updates must be serial for consistency)
+        for i, (result, (company_a, company_b)) in enumerate(zip(results, matchups)):
+            battle_num += 1
+
+            if isinstance(result, Exception):
+                errors += 1
+                print(f"  [!] Battle {battle_num}: OpenAI error – {result}")
+                continue
+
+            winner_name = result
+            a_name = name_map[company_a["id"]]
+            b_name = name_map[company_b["id"]]
+
+            # Determine winner / loser via fuzzy match
+            if winner_name.lower().strip() == a_name.lower().strip():
+                winner, loser = company_a, company_b
+            elif winner_name.lower().strip() == b_name.lower().strip():
+                winner, loser = company_b, company_a
+            elif a_name.lower() in winner_name.lower():
+                winner, loser = company_a, company_b
+            elif b_name.lower() in winner_name.lower():
+                winner, loser = company_b, company_a
+            else:
+                errors += 1
+                print(
+                    f"  [?] Battle {battle_num}: unclear answer '{winner_name}' "
+                    f"for {a_name} vs {b_name} – skipping"
+                )
+                continue
+
+            # Compute new ELOs
+            new_winner_elo, new_loser_elo = compute_new_elos(
+                elo_map[winner["id"]], elo_map[loser["id"]]
             )
-        except Exception as e:
-            errors += 1
-            print(f"  [!] Battle {battle_num}: OpenAI error – {e}")
-            time.sleep(2)
-            continue
 
-        # Determine winner / loser
-        # Fuzzy match: check which company name the response is closest to
-        a_name = name_map[company_a["id"]]
-        b_name = name_map[company_b["id"]]
+            # Update in-memory
+            elo_map[winner["id"]] = new_winner_elo
+            elo_map[loser["id"]] = new_loser_elo
 
-        if winner_name.lower().strip() == a_name.lower().strip():
-            winner, loser = company_a, company_b
-        elif winner_name.lower().strip() == b_name.lower().strip():
-            winner, loser = company_b, company_a
-        elif a_name.lower() in winner_name.lower():
-            winner, loser = company_a, company_b
-        elif b_name.lower() in winner_name.lower():
-            winner, loser = company_b, company_a
-        else:
-            # Can't determine winner – skip
-            errors += 1
-            print(
-                f"  [?] Battle {battle_num}: unclear answer '{winner_name}' "
-                f"for {a_name} vs {b_name} – skipping"
-            )
-            continue
+            # Update database
+            try:
+                update_elo_in_db(winner["id"], new_winner_elo)
+                update_elo_in_db(loser["id"], new_loser_elo)
+                wins += 1
+            except Exception as e:
+                errors += 1
+                print(f"  [!] Battle {battle_num}: DB error – {e}")
+                continue
 
-        # Compute new ELOs
-        new_winner_elo, new_loser_elo = compute_new_elos(
-            elo_map[winner["id"]], elo_map[loser["id"]]
-        )
-
-        # Update in-memory
-        elo_map[winner["id"]] = new_winner_elo
-        elo_map[loser["id"]] = new_loser_elo
-
-        # Update database
-        try:
-            update_elo_in_db(winner["id"], new_winner_elo)
-            update_elo_in_db(loser["id"], new_loser_elo)
-            wins += 1
-        except Exception as e:
-            errors += 1
-            print(f"  [!] Battle {battle_num}: DB error – {e}")
-            continue
-
-        if battle_num % BATCH_PRINT_EVERY == 0:
-            elapsed = time.time() - start
-            rate = battle_num / elapsed if elapsed > 0 else 0
-            print(
-                f"  Battle {battle_num:>6}/{TOTAL_BATTLES} | "
-                f"{name_map[winner['id']]:>30} beat {name_map[loser['id']]:<30} | "
-                f"OK={wins} ERR={errors} | {rate:.1f} battles/s"
-            )
+            if battle_num % BATCH_PRINT_EVERY == 0:
+                elapsed = time.time() - start
+                rate = battle_num / elapsed if elapsed > 0 else 0
+                print(
+                    f"  Battle {battle_num:>6}/{TOTAL_BATTLES} | "
+                    f"{name_map[winner['id']]:>30} beat {name_map[loser['id']]:<30} | "
+                    f"OK={wins} ERR={errors} | {rate:.1f} battles/s"
+                )
 
     elapsed = time.time() - start
     print(f"\nDone! {wins} successful battles, {errors} errors in {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 
